@@ -1,132 +1,201 @@
 #!/usr/bin/env python3
-"""Initialize SQLite database for database"""
+"""Initialize SQLite database for the Smart To-Do List app.
 
-import sqlite3
+This script is intended for the database container. It creates a fresh SQLite database
+file (myapp.db) with tables that mirror the Android Room schema used by the app.
+
+Tables:
+- categories
+- tasks
+
+It also creates helpful indexes and inserts small seed data to ensure the app has
+something to display on first launch.
+
+Note:
+- This script intentionally replaces the previous sample tables (users/app_info).
+- Foreign keys are enabled.
+"""
+
 import os
+import sqlite3
 
 DB_NAME = "myapp.db"
-DB_USER = "kaviasqlite"  # Not used for SQLite, but kept for consistency
-DB_PASSWORD = "kaviadefaultpassword"  # Not used for SQLite, but kept for consistency
-DB_PORT = "5000"  # Not used for SQLite, but kept for consistency
 
-print("Starting SQLite setup...")
+# Kept for consistency with other templates; not used by SQLite.
+DB_USER = "kaviasqlite"
+DB_PASSWORD = "kaviadefaultpassword"
+DB_PORT = "5000"
 
-# Check if database already exists
-db_exists = os.path.exists(DB_NAME)
-if db_exists:
-    print(f"SQLite database already exists at {DB_NAME}")
-    # Verify it's accessible
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        conn.execute("SELECT 1")
-        conn.close()
-        print("Database is accessible and working.")
-    except Exception as e:
-        print(f"Warning: Database exists but may be corrupted: {e}")
-else:
-    print("Creating new SQLite database...")
 
-# Create database with sample tables
-conn = sqlite3.connect(DB_NAME)
-cursor = conn.cursor()
+def _connect(db_path: str) -> sqlite3.Connection:
+    """Create a SQLite connection with foreign keys enabled."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
 
-# Create initial schema
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS app_info (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        key TEXT UNIQUE NOT NULL,
-        value TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+def _create_schema(cursor: sqlite3.Cursor) -> None:
+    """Create the Smart To-Do schema (categories, tasks) and indexes."""
+    # categories table
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL COLLATE NOCASE,
+            color TEXT,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')*1000),
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')*1000),
+            UNIQUE(name)
+        )
+        """
     )
-""")
 
-# Create a sample users table as an example
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        email TEXT UNIQUE NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    # tasks table
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT,
+            due_at INTEGER,
+            is_completed INTEGER NOT NULL DEFAULT 0 CHECK (is_completed IN (0,1)),
+            completed_at INTEGER,
+            category_id INTEGER,
+            priority INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')*1000),
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')*1000),
+            FOREIGN KEY(category_id) REFERENCES categories(id)
+                ON UPDATE CASCADE
+                ON DELETE SET NULL,
+            CHECK (completed_at IS NULL OR is_completed = 1),
+            CHECK (due_at IS NULL OR due_at >= 0)
+        )
+        """
     )
-""")
 
-# Insert initial data
-cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)", 
-               ("project_name", "database"))
-cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)", 
-               ("version", "0.1.0"))
-cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)", 
-               ("author", "John Doe"))
-cursor.execute("INSERT OR REPLACE INTO app_info (key, value) VALUES (?, ?)", 
-               ("description", ""))
+    # Indexes to support typical app queries (filter by category/completion, sort by due date, etc.)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_category_id ON tasks(category_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_due_at ON tasks(due_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_is_completed ON tasks(is_completed)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_completed_at ON tasks(completed_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_categories_sort_order ON categories(sort_order)")
 
-conn.commit()
 
-# Get database statistics
-cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-table_count = cursor.fetchone()[0]
+def _seed_data(cursor: sqlite3.Cursor) -> None:
+    """Insert seed categories and tasks (safe to run multiple times)."""
+    # Categories: align with app theme accents.
+    categories = [
+        ("Personal", "#10B981", 0),
+        ("Work", "#374151", 1),
+        ("Shopping", "#9CA3AF", 2),
+        ("Health", "#EF4444", 3),
+    ]
+    for name, color, sort_order in categories:
+        cursor.execute(
+            "INSERT OR IGNORE INTO categories (name, color, sort_order) VALUES (?, ?, ?)",
+            (name, color, sort_order),
+        )
 
-cursor.execute("SELECT COUNT(*) FROM app_info")
-record_count = cursor.fetchone()[0]
+    # Seed tasks: small starter content.
+    # We intentionally do NOT use OR IGNORE here because tasks don't have a natural unique key.
+    # Only insert tasks if the tasks table is empty.
+    cursor.execute("SELECT COUNT(*) FROM tasks")
+    task_count = cursor.fetchone()[0]
+    if task_count == 0:
+        cursor.execute(
+            """
+            INSERT INTO tasks (title, description, due_at, is_completed, category_id, priority)
+            VALUES (?, ?, NULL, 0, (SELECT id FROM categories WHERE name = 'Personal'), 0)
+            """,
+            ("Welcome to Smart To-Do", "Tap a task to edit it. Use the + button to add more."),
+        )
+        cursor.execute(
+            """
+            INSERT INTO tasks (title, description, due_at, is_completed, category_id, priority)
+            VALUES (?, ?, NULL, 0, (SELECT id FROM categories WHERE name = 'Work'), 1)
+            """,
+            ("Plan your week", "Add a few work tasks and set due dates."),
+        )
+        cursor.execute(
+            """
+            INSERT INTO tasks (title, description, due_at, is_completed, category_id, priority)
+            VALUES (?, ?, NULL, 0, (SELECT id FROM categories WHERE name = 'Shopping'), 0)
+            """,
+            ("Buy groceries", "Milk, eggs, bread, fruit."),
+        )
 
-conn.close()
 
-# Save connection information to a file
-current_dir = os.getcwd()
-connection_string = f"sqlite:///{current_dir}/{DB_NAME}"
+def _write_connection_files(db_path: str) -> None:
+    """Write db_connection.txt and db_visualizer/sqlite.env to reflect current DB path."""
+    current_dir = os.getcwd()
+    connection_string = f"sqlite:///{current_dir}/{DB_NAME}"
 
-try:
-    with open("db_connection.txt", "w") as f:
-        f.write(f"# SQLite connection methods:\n")
+    # db_connection.txt (used as source of truth for connection info)
+    with open("db_connection.txt", "w", encoding="utf-8") as f:
+        f.write("# SQLite connection methods:\n")
         f.write(f"# Python: sqlite3.connect('{DB_NAME}')\n")
         f.write(f"# Connection string: {connection_string}\n")
         f.write(f"# File path: {current_dir}/{DB_NAME}\n")
-    print("Connection information saved to db_connection.txt")
-except Exception as e:
-    print(f"Warning: Could not save connection info: {e}")
 
-# Create environment variables file for Node.js viewer
-db_path = os.path.abspath(DB_NAME)
-
-# Ensure db_visualizer directory exists
-if not os.path.exists("db_visualizer"):
+    # db_visualizer environment file
     os.makedirs("db_visualizer", exist_ok=True)
-    print("Created db_visualizer directory")
+    with open("db_visualizer/sqlite.env", "w", encoding="utf-8") as f:
+        f.write(f'export SQLITE_DB="{os.path.abspath(db_path)}"\n')
 
-try:
-    with open("db_visualizer/sqlite.env", "w") as f:
-        f.write(f"export SQLITE_DB=\"{db_path}\"\n")
-    print(f"Environment variables saved to db_visualizer/sqlite.env")
-except Exception as e:
-    print(f"Warning: Could not save environment variables: {e}")
 
-print("\nSQLite setup complete!")
-print(f"Database: {DB_NAME}")
-print(f"Location: {current_dir}/{DB_NAME}")
-print("")
+def main() -> None:
+    """Entrypoint to initialize or validate the SQLite database."""
+    print("Starting SQLite setup...")
 
-print("To use with Node.js viewer, run: source db_visualizer/sqlite.env")
+    db_exists = os.path.exists(DB_NAME)
+    if db_exists:
+        print(f"SQLite database already exists at {DB_NAME}")
+    else:
+        print("Creating new SQLite database...")
 
-print("\nTo connect to the database, use one of the following methods:")
-print(f"1. Python: sqlite3.connect('{DB_NAME}')")
-print(f"2. Connection string: {connection_string}")
-print(f"3. Direct file access: {current_dir}/{DB_NAME}")
-print("")
+    conn = _connect(DB_NAME)
+    try:
+        cursor = conn.cursor()
 
-print("Database statistics:")
-print(f"  Tables: {table_count}")
-print(f"  App info records: {record_count}")
+        # Create schema + indexes
+        _create_schema(cursor)
 
-# If sqlite3 CLI is available, show how to use it
-try:
-    import subprocess
-    result = subprocess.run(['which', 'sqlite3'], capture_output=True, text=True)
-    if result.returncode == 0:
-        print("")
-        print("SQLite CLI is available. You can also use:")
-        print(f"  sqlite3 {DB_NAME}")
-except:
-    pass
+        # Seed data
+        _seed_data(cursor)
 
-# Exit successfully
-print("\nScript completed successfully.")
+        conn.commit()
+
+        # Stats
+        cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        table_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM categories")
+        categories_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM tasks")
+        tasks_count = cursor.fetchone()[0]
+
+    finally:
+        conn.close()
+
+    _write_connection_files(DB_NAME)
+
+    print("\nSQLite setup complete!")
+    print(f"Database: {DB_NAME}")
+    print(f"Location: {os.getcwd()}/{DB_NAME}")
+    print("")
+    print("To use with Node.js viewer, run: source db_visualizer/sqlite.env")
+    print("\nTo connect to the database, use one of the following methods:")
+    print(f"1. Python: sqlite3.connect('{DB_NAME}')")
+    print(f"2. Connection string: sqlite:///{os.getcwd()}/{DB_NAME}")
+    print(f"3. Direct file access: {os.getcwd()}/{DB_NAME}")
+    print("")
+    print("Database statistics:")
+    print(f"  Tables: {table_count}")
+    print(f"  Categories: {categories_count}")
+    print(f"  Tasks: {tasks_count}")
+    print("\nScript completed successfully.")
+
+
+if __name__ == "__main__":
+    main()
